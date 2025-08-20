@@ -1,0 +1,72 @@
+version: '3.8'  # 使用 Docker Compose 版本 3.8
+
+services:
+  # Node.js 应用服务
+  node-app:
+    image: wangyu-node:1.0.0  # 构建后的镜像名称
+    container_name: wangyu-node-container  # 自定义容器名称
+    restart: unless-stopped  # 容器退出时自动重启（除非手动停止）
+    environment:
+      - NODE_ENV=production  # 设置环境变量
+      - DB_HOST=mysql  # 使用服务名连接 MySQL
+      - REDIS_HOST=redis  # 使用服务名连接 Redis
+    volumes:
+      - /var/log/node:/opt/wangyu/log  # 挂载服务日志
+    depends_on:
+      - mysql
+      - redis
+    networks:
+      - app-network  # 连接到自定义网络
+
+  # Nginx 反向代理服务
+  nginx:
+    image: nginx:latest
+    container_name: nginx-container
+    ports:
+      - "80:80"  # 暴露 80 端口到宿主机
+      - "443:443"  # 如需 HTTPS 可启用
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro  # 挂载自定义 Nginx 配置
+      - ./ssl:/etc/nginx/ssl:ro  # 挂载 SSL 证书（可选）
+    depends_on:
+      - node-app  # 等待 Node 服务启动
+    networks:
+      - app-network
+
+  # MySQL 数据库服务
+  mysql:
+    image: mysql:8.0
+    container_name: mysql-container
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword  # 设置 root 密码
+      MYSQL_DATABASE: app_db  # 自动创建数据库
+      MYSQL_USER: app_user  # 创建普通用户
+      MYSQL_PASSWORD: userpassword
+    volumes:
+      - mysql-data:/var/lib/mysql  # 持久化数据库数据
+    ports:
+      - "3306:3306"  # 暴露到宿主机（仅开发建议，生产环境应通过内部网络访问）
+    networks:
+      - app-network
+
+  # Redis 缓存服务
+  redis:
+    image: redis:6-alpine
+    container_name: redis-container
+    command: redis-server --requirepass your_redis_password  # 设置 Redis 密码
+    volumes:
+      - redis-data:/data  # 持久化 Redis 数据
+    ports:
+      - "6379:6379"  # 暴露端口（开发建议）
+    networks:
+      - app-network
+
+# 定义网络（使服务可通过服务名互访）
+networks:
+  app-network:
+    driver: bridge  # 创建桥接网络
+
+# 定义持久化数据卷
+volumes:
+  mysql-data:  # MySQL 命名数据卷（无需显式指定宿主机挂载路径，由docker容器内部自动管理）
+  redis-data:  # Redis 命名数据卷
