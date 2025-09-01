@@ -1,0 +1,110 @@
+# 使用轻量级 Debian bookworm-slim 作为基础镜像
+FROM debian:bookworm-slim
+
+# 创建系统组 mysql (-r 表示系统组)
+# 创建系统用户 mysql 并加入 mysql 组，确保 UID/GID 一致性
+RUN groupadd -r mysql && useradd -r -g mysql mysql
+
+# 更新软件包列表
+# 安装 gnupg（用于 GPG 密钥管理），不安装推荐依赖
+# 清理 APT 缓存减少镜像体积
+RUN apt-get update && apt-get install -y --no-install-recommends gnupg && rm -rf /var/lib/apt/lists/*
+
+# 设置环境变量 GOSU_VERSION=1.17
+# 安装临时依赖 ca-certificates, wget
+# 根据当前架构下载对应版本的 gosu 二进制文件和签名
+# 通过 GPG 验证文件完整性
+# 清理临时文件并设置可执行权限
+# 验证 gosu 可用性（gosu nobody true）
+ENV GOSU_VERSION 1.17
+RUN set -eux; \
+	savedAptMark="$(apt-mark showmanual)"; \
+	apt-get update; \
+	apt-get install -y --no-install-recommends ca-certificates wget; \
+	rm -rf /var/lib/apt/lists/*; \
+	dpkgArch="$(dpkg --print-architecture | awk -F- '{ print $NF }')"; \
+	wget -O /usr/local/bin/gosu "https://github.com/tianon/gosu/releases/download/$GOSU_VERSION/gosu-$dpkgArch"; \
+	wget -O /usr/local/bin/gosu.asc "https://github.com/tianon/gosu/releases/download/$GOSU_VERSION/gosu-$dpkgArch.asc"; \
+	export GNUPGHOME="$(mktemp -d)"; \
+	gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys B42F6819007F00F88E364FD4036A9C25BF357DD4; \
+	gpg --batch --verify /usr/local/bin/gosu.asc /usr/local/bin/gosu; \
+	gpgconf --kill all; \
+	rm -rf "$GNUPGHOME" /usr/local/bin/gosu.asc; \
+	apt-mark auto '.*' > /dev/null; \
+	[ -z "$savedAptMark" ] || apt-mark manual $savedAptMark > /dev/null; \
+	apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false; \
+	chmod +x /usr/local/bin/gosu; \
+	gosu --version; \
+	gosu nobody true
+
+# 创建初始化脚本目录
+RUN mkdir /docker-entrypoint-initdb.d
+
+# 安装 MySQL 安装/运行必需的依赖：
+# bzip2, xz-utils, zstd：解压工具
+# openssl：加密通信
+# perl：MySQL 安装脚本依赖
+RUN set -eux; \
+	apt-get update; \
+	apt-get install -y --no-install-recommends \
+		bzip2 \
+		openssl \
+		perl \
+		xz-utils \
+		zstd \
+	; \
+	rm -rf /var/lib/apt/lists/*
+
+# 定义 MySQL 官方 GPG 密钥
+# 从 Ubuntu 密钥服务器下载密钥
+# 导出密钥到 /etc/apt/keyrings/mysql.gpg（供 APT 验证软件包签名）
+RUN set -eux; \
+	key='BCA4 3417 C3B4 85DD 128E C6D4 B7B3 B788 A8D3 785C'; \
+	export GNUPGHOME="$(mktemp -d)"; \
+	gpg --batch --keyserver keyserver.ubuntu.com --recv-keys "$key"; \
+	mkdir -p /etc/apt/keyrings; \
+	gpg --batch --export "$key" > /etc/apt/keyrings/mysql.gpg; \
+	gpgconf --kill all; \
+	rm -rf "$GNUPGHOME"
+
+# 定义环境变量：MYSQL_MAJOR=8.0（主版本）、MYSQL_VERSION=8.0.43-1debian12（精确版本）
+ENV MYSQL_MAJOR 8.0
+ENV MYSQL_VERSION 8.0.43-1debian12
+
+# 创建源列表文件，指向 MySQL 官方仓库（signed-by 指定使用导入的 GPG 密钥验证仓库）
+RUN echo 'deb [ signed-by=/etc/apt/keyrings/mysql.gpg ] http://repo.mysql.com/apt/debian/ bookworm mysql-8.0' > /etc/apt/sources.list.d/mysql.list
+
+# 预置配置（通过 debconf-set-selections）：跳过数据目录设置、设置空 root 密码、禁用测试数据库
+# 安装指定版本的 MySQL 客户端和服务器核心
+# 清理并初始化目录：重建 /var/lib/mysql（数据目录）和 /var/run/mysqld（运行时目录）、设置目录所有者及权限（1777 为粘滞位）
+RUN { \
+		echo mysql-community-server mysql-community-server/data-dir select ''; \
+		echo mysql-community-server mysql-community-server/root-pass password ''; \
+		echo mysql-community-server mysql-community-server/re-root-pass password ''; \
+		echo mysql-community-server mysql-community-server/remove-test-db select false; \
+	} | debconf-set-selections \
+	&& apt-get update \
+	&& apt-get install -y \
+		mysql-community-client="${MYSQL_VERSION}" \
+		mysql-community-server-core="${MYSQL_VERSION}" \
+	&& rm -rf /var/lib/apt/lists/* \
+	&& rm -rf /var/lib/mysql && mkdir -p /var/lib/mysql /var/run/mysqld \
+	&& chown -R mysql:mysql /var/lib/mysql /var/run/mysqld \
+	&& chmod 1777 /var/run/mysqld /var/lib/mysql
+
+# 声明数据卷，将 MySQL 数据持久化（命名数据卷由 Docker 管理）
+VOLUME /var/lib/mysql
+
+# 复制自定义配置文件到 /etc/mysql/
+# 复制入口脚本 docker-entrypoint.sh 到系统路径
+# 创建符号链接 /entrypoint.sh 兼容老版本镜像使用/entrypoint.sh访问
+COPY config/ /etc/mysql/
+COPY docker-entrypoint.sh /usr/local/bin/
+RUN ln -s usr/local/bin/docker-entrypoint.sh /entrypoint.sh 
+
+# ENTRYPOINT：指定入口脚本（处理初始化、权限降级等）
+# EXPOSE：声明监听端口（3306：客户端，33060：X Protocol）
+# CMD：默认启动命令（运行 mysqld）
+ENTRYPOINT ["docker-entrypoint.sh"]
+EXPOSE 3306 33060
+CMD ["mysqld"]
