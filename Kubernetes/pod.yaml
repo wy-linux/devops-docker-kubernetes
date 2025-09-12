@@ -1,0 +1,122 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mysql-pod
+  namespace: wangyu
+spec:
+  # 容器定义部分
+  containers:
+  - name: mysql-container
+    image: mysql:8.0
+    # 镜像拉取策略：Always表示总是从远程仓库拉取，IfNotPresent表示本地有则使用本地（默认策略），Never只使用本地镜像
+    imagePullPolicy: IfNotPresent
+    
+    # 环境变量配置（MySQL配置）
+    env:
+    - name: MYSQL_ROOT_PASSWORD
+      value: "wangyu123"
+    - name: MYSQL_DATABASE
+      value: "wangyu"
+    
+    # 资源限制配置
+    resources:
+      # 请求资源（调度依据，确保节点有足够资源）
+      requests:
+        memory: "512Mi"
+        cpu: "250m"
+      # 运行限制，防止容器使用过多资源
+      limits:
+        memory: "1Gi"
+        cpu: "500m"
+    
+    # 声明容器使用的端口，用于文档化 Pod 端口配置，不会在主机上映射端口，不会强制容器监听该端口
+    ports:
+    - containerPort: 3306
+      protocol: TCP
+    
+    # 存活探针：检查容器是否正在运行
+    livenessProbe:
+      # 使用TCP Socket检查
+      tcpSocket:
+        port: 3306
+      # 初始探测延迟（容器启动后10秒开始探测）
+      initialDelaySeconds: 10
+      # 探测间隔时间
+      periodSeconds: 10
+      # 探测超时时间
+      timeoutSeconds: 5
+      # 连续失败次数标记为不健康
+      failureThreshold: 3
+    
+    # 就绪探针：检查容器是否准备好服务请求
+    readinessProbe:
+      # 使用MySQL命令行检查数据库是否就绪
+      exec:
+        command:
+        - mysql
+        - -uroot
+        - -pwangyu123
+        - -e
+        - "SELECT 1;"
+      initialDelaySeconds: 15
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+    
+    # 数据持久化存储卷挂载
+    volumeMounts:
+    - name: mysql-storage
+      mountPath: /var/lib/mysql
+  
+  # 存储卷定义
+  volumes:
+  - name: mysql-storage
+    # emptyDir 临时存储 Pod删除 → 数据丢失、
+    # PersistentVolumeClaim 网络持久化存储 Pod删除 → 数据安全保留 新Pod可重新挂载同一存储
+    # HostPath 节点本地存储 Pod删除 → 数据保留在节点上 Pod调度到新节点 → 数据丢失
+    hostPath: 
+      path: /mnt/data/mysql # 将节点上的 /mnt/data/mysql 路径挂载到容器内
+      type: DirectoryOrCreate # 如果路径不存在，则创建该目录
+
+  # Pod重启策略：Always容器终止退出时总是重启（默认）、OnFailure容器以非零状态码退出时重启、Never从不重启
+  restartPolicy: OnFailure
+  
+  # 节点选择器：简单选择带有特定标签的节点
+  # 给 k8s-node-1 的节点打上 disktype=ssd 的标签： kubectl label nodes k8s-node-1 disktype=ssd
+  nodeSelector:
+    disktype: ssd
+  
+  # 节点亲和性：更复杂的节点选择规则
+  affinity:
+    nodeAffinity:
+      # 硬亲和性：必须满足的规则，如果找不到匹配的节点，Pod 将无法被调度（保持 Pending 状态），它只在调度时起作用
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: kubernetes.io/arch
+            operator: In
+            values:
+            - amd64
+      # 软亲和性：优先选择的规则，调度器会尝试寻找满足这个条件的节点，但如果找不到，Pod 仍然会被调度到某个不满足此条件的节点上，而不会导致调度失败
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 1 # 为当前偏好设置一个权重值，当有多个节点满足硬性条件时，调度器会为每个节点计算总分。最终，调度器会选择总分最高的节点
+        preference:
+          matchExpressions:
+          - key: database
+            operator: In
+            values:
+            - enabled
+  
+  # 污点容忍：允许Pod调度到带有特定污点的节点上
+  # 给节点 node-1 打上污点 kubectl taint nodes node-1 special=true:NoSchedule （kubectl taint nodes <node-name> <key>=<value>:<effect>）
+  # 删除节点 node-1 上 key 为 special 且 effect 为 NoSchedule 的污点 kubectl taint nodes node-1 special:NoSchedule- （kubectl taint nodes <node-name> <key>[:<effect>]-）
+  tolerations:
+  - key: "special"
+    operator: "Equal" # 表示需要 key 和 value 都完全匹配（这是默认操作符，要求提供 value 字段）
+    value: "true"
+    effect: "NoSchedule" # 禁止调度：如果没有容忍此污点，新的 Pod 将不会被调度到该节点上。不影响节点上已存在的 Pod
+    # effect: "PreferNoSchedule" # 尽量避免调度：调度器会尽量避免将没有容忍此污点的 Pod 调度到此节点，但如果没有其他可用节点，仍然会调度
+  - key: "disk-pressure" 
+    operator: "Exists" # 表示只要存在这个 key 的污点就容忍，不关心 value 是什么（使用 Exists 时不能指定 value）
+    effect: "NoExecute" # 禁止执行并驱逐：1. 调度：和 NoSchedule 一样，阻止新的 Pod 调度上来 2. 驱逐：如果该污点被添加到一个已有 Pod 在运行的节点上，那么所有不能容忍这个污点的 Pod 将会被立即驱逐（从节点上删除）
+    tolerationSeconds: 3600  # 容忍时间（秒），超过这个时间后，如果污点仍然存在，Pod 才会被驱逐；如果设置为 0，则表示污点出现时立即驱逐；如果不设置此字段，则表示无限期容忍，Pod 会一直运行下去，直到污点消失或Pod自己结束
