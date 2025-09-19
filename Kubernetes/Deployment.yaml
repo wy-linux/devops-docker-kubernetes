@@ -1,0 +1,110 @@
+---
+# Deployment：Deployment 的主要作用是声明 Pod 的期望状态，并确保实际状态始终匹配这个期望状态，它通过管理一个 ReplicaSet（副本集）来实现这一目标。具体来说，Deployment 提供了以下至关重要的功能：
+    # Pod 的副本数与高可用：如果有一个 Pod 因为节点故障或容器崩溃而终止，DeplicaSet（受 Deployment 控制）会立即检测到并创建一个新的 Pod 来替换它
+    # 无缝的滚动更新：发布新版本时，它会逐步创建新的 Pod（基于新镜像），并逐步终止旧的 Pod，直到所有 Pod 都更新为新版本，这个过程可以确保服务不中断
+    # 便捷的回滚：如果新版本上线后发现有 bug，只需要执行命令（kubectl rollout undo deployment/<deployment-name>）就能将整个 Deployment 回滚到之前的稳定版本
+    # 扩缩容：当流量高峰来临，你可以轻松地通过命令将 Pod 副本数从 3 个扩展到 10 个（kubectl scale deployment/<deployment-name> --replicas=10），流量低谷时再缩容回去
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wangyu-node
+  namespace: wangyu
+spec:
+  # 指定期望运行的 Pod 副本数量为 3 个，Deployment 控制器将确保始终有 3 个实例处于运行状态
+  replicas: 3 
+  # 定义 Deployment 如何找到要管理的 Pod，它会选择所有带有 app: wangyu-node 标签的 Pod 来进行管理
+  selector:
+    matchLabels:
+      app: wangyu-node
+  template:
+    metadata:
+      # 给根据此模板创建的 Pod 打上 app: wangyu-node 的标签，这必须与上面的 selector.matchLabels 相匹配，否则 Deployment 将无法关联和管理它创建的 Pod
+      labels:
+        app: wangyu-node
+      annotations: # 注解字段：是 Kubernetes 元数据的一部分，与 labels 类似，但它不用于标识和选择对象，而是用于存储非识别性的、供外部工具使用的元数据。Prometheus 利用这些注解来获取如何监控此 Pod 的指令
+        prometheus.io/scrape: 'true' # 是否抓取 Pod 指标数据
+        prometheus.io/path: /metrics # Pod 指标数据抓取 HTTP API 路径
+        prometheus.io/port: '7000' # Pod 指标数据抓取端口
+    spec:
+      containers:
+        - name: wangyu-node-container # 容器的名称
+          image: wangyu-node:1.0.0 # 容器使用的镜像地址和标签
+          env: # 为容器设置环境变量
+            - name: CONSUL_MYSQL_PREFIX 
+              value: wangyu/global/mysql # mysql相关consul配置
+            - name: CONSUL_REDIS_PREFIX
+              value: wangyu/global/redis # redis相关consul配置
+            - name: CONSUL_HOST_IP
+              value: wangyu.consul.com # consul访问地址
+            - name: CONSUL_HOST_PORT
+              value: "8500" # consul访问端口
+            - name: ZIPKIN_BASE_URL
+              value: http://wangyu.zipkin.com:9411 # zipkin访问地址
+            - name: APP_NAME 
+              value: wangyu-node # 部署应用名称
+            - name: NAMESPACE
+              value: wangyu # 部署命名空间
+            - name: NODE_FLAGS
+              value: "--max-old-space-size=3000" # 设置 V8 引擎的内存最大限制为 3000MB（3GB）
+          # 就绪探针： 检查容器是否已准备好接收流量
+          readinessProbe:
+            httpGet:
+              path: /k8s/probe/ping
+              port: 3000
+            initialDelaySeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+            periodSeconds: 3
+          # 存活探针： 检查容器是否仍在正常运行。如果检查失败，kubelet 会重启容器
+          livenessProbe:
+            httpGet:
+              path: /k8s/probe/ping
+              port: 3000
+            initialDelaySeconds: 60
+            timeoutSeconds: 3
+            failureThreshold: 10
+            periodSeconds: 3
+          volumeMounts:
+            - mountPath: /mnt/logs
+              name: applog
+          resources:
+            limits:
+              memory: "3500Mi" # 内存硬限制约为 3.5 GB，如果容器尝试使用更多内存，它会被操作系统终止（OOMKilled）
+              cpu: 1000m # CPU 硬限制为 1 个核心
+            requests:
+              memory: "1500Mi"
+              cpu: 300m
+      volumes:
+        - name: applog # 卷的名称，与上面的 volumeMounts 对应
+          hostPath:
+            path: /app/logs/wangyu-node
+      tolerations: 
+        - effect: NoExecute
+          key: node.kubernetes.io/unreachable
+          operator: Exists
+          tolerationSeconds: 20 # 允许 Pod 在节点出现 unreachable 问题时，还能在节点上保留 20 秒，然后被驱逐
+        - effect: NoExecute
+          key: node.kubernetes.io/not-ready
+          operator: Exists
+          tolerationSeconds: 20 # 允许 Pod 在节点出现 not-ready 问题时，还能在节点上保留 20 秒，然后被驱逐
+        - key: "wangyu.com/grade"
+          operator: "Equal"
+          value: "core" # 允许 Pod 被调度到带有 taint（污点）的节点上，该污点的键为 cloudglab.com/grade，值为 core，效果为 NoSchedule
+          effect: "NoSchedule"
+      affinity:
+        # pod反亲和性，避免将 Pod 调度到与某些已有 Pod 相同的拓扑域，将同一服务的副本分散开，避免单点故障
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app: wangyu-node # 避开所有拥有 app: wangyu-node 这个标签的 Pod
+              # 拓扑键：定义“拓扑域”的节点标签的键，调度器工作流程：
+                  # 1.首先通过 labelSelector 找到所有需要避开的 Pod（即所有 app: wangyu-node 的 Pod）
+                  # 2.查看这些 Pod 各自运行在哪些节点上，并读取这些节点上的 wangyu.com/grade 这个标签的值
+                  # 3.它会确保不会将当前要调度的 Pod 分配到任何这样一个节点：该节点 wangyu.com/grade 标签的值，与任何一个需要避开的 Pod 所在节点的 wangyu.com/grade 标签的值 相同
+              topologyKey: wangyu.com/grade
+      nodeSelector:
+        # 节点选择器：这是一个硬性要求，指定 Pod 必须被调度到带有 wangyu.com/grade=core 标签的节点上
+        wangyu.com/grade: core 

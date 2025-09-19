@@ -1,3 +1,7 @@
+---
+# Pod：Pod 是 Kubernetes 中可以创建和管理的最小单元，一个 Pod 类似于一台“虚拟机”或“物理主机”，它内部可以运行一个或多个紧密相关的容器。这些容器共享：
+    # 网络命名空间： Pod 中的每个容器共享同一个 IP 地址和端口空间。它们可以通过 localhost 互相通信
+    # 存储卷（Volumes）： Pod 可以定义一组共享的存储卷，使其中的容器可以共享文件
 apiVersion: v1
 kind: Pod
 metadata:
