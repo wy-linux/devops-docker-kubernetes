@@ -1,0 +1,87 @@
+---
+# StatefulSet：适用于有状态应用，提供稳定的网络标识（Pod 名称、主机名）和持久化存储
+apiVersion: apps/v1
+kind: StatefulSet
+# metadata 包含 StatefulSet 的元数据，如名称和标签
+metadata:
+  # name 指定 StatefulSet 的名称
+  name: mysql-statefulset
+  # labels 为 StatefulSet 添加键值对标签，用于识别和筛选
+  labels:
+    app: mysql
+spec:
+  # serviceName 指定与该 StatefulSet 关联的 Headless Service 名称
+  # Headless Service 用于控制网络域，确保 Pod 有稳定的唯一标识
+  serviceName: "mysql-service"
+  # replicas 定义需要运行的 Pod 副本数量
+  # 对于有状态应用，通常逐个部署以确保数据一致性（有部署顺序0、1、2...）
+  replicas: 3
+  # selector 定义如何找到属于该 StatefulSet 的 Pod
+  selector:
+    # matchLabels 必须匹配 template.metadata.labels 中定义的标签
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      # labels 为 Pod 添加标签，用于 Service 识别和筛选
+      labels:
+        app: mysql
+    # spec 定义 Pod 的具体规格
+    spec:
+      containers:
+      - name: mysql
+        image: mysql:8.0
+        env:
+        # name 指定环境变量名称，value 指定其值
+        - name: MYSQL_ROOT_PASSWORD
+          value: "wangyu123"
+        - name: MYSQL_DATABASE
+          value: "wangyu"
+        - name: MYSQL_USER
+          value: "user"
+        - name: MYSQL_PASSWORD
+          value: "wangyu123"
+        ports:
+        - containerPort: 3306
+          name: mysql
+        # volumeMounts 定义容器内挂载的存储卷
+        volumeMounts:
+        # name 指定引用的存储卷名称，必须与 volumeClaimTemplates 名称匹配
+        # mountPath 指定容器内的挂载路径
+        - name: mysql-data
+          mountPath: /var/lib/mysql
+  # volumeClaimTemplates 定义持久卷声明（PVC）模板
+  # 每个 Pod 会根据模板自动创建独立的 PVC
+  volumeClaimTemplates:
+  # metadata 包含 PVC 的元数据
+  - metadata:
+      # name 指定 PVC 的名称，会被 Pod 引用
+      name: mysql-data
+    # spec 定义 PVC 的具体规格
+    spec:
+      # accessModes 定义存储访问模式
+      # ReadWriteOnce 表示卷可被单个节点读写挂载
+      accessModes: [ "ReadWriteOnce" ]
+      # storageClassName 指定使用的存储类名称
+      # 如果为空则使用默认存储类，需确保集群中已配置
+      storageClassName: "standard"
+      # resources 定义存储资源请求
+      resources:
+        # requests 指定存储空间大小
+        requests:
+          storage: 10Gi
+
+---
+# Headless Service（需单独创建）：通过直接解析 Pod IP 提供网络标识，服务名称通过 serviceName 字段指定
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-service
+spec:
+  # 设置为 Headless Service
+  # pod的唯一网络标识：主机名称.service名称.命名空间.svc.cluster.local(mysql-statefulset-0.mysql-service.namespace.svc.cluster.local)
+  clusterIP: None  
+  selector:
+    app: mysql
+  ports:
+  - port: 3306
