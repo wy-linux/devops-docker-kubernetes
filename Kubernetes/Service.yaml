@@ -1,0 +1,76 @@
+---
+# ClusterIP：默认的Service类型、只能在集群内部访问、提供一个虚拟IP作为服务入口
+apiVersion: v1
+kind: Service
+# 元数据部分，定义Service的名称和标签
+metadata:
+  name: my-clusterip-service  # Service的名称
+  namespace: wangyu          # 所在的命名空间
+# 规范部分，定义Service的行为
+spec:
+  type: ClusterIP             # Service类型，ClusterIP是默认类型
+  selector:                   # 选择器，用于匹配Pod
+    app: wangyu-node            # 选择具有app=wangyu-node标签的Pod
+  ports:
+  - name: http                # 端口名称
+    protocol: TCP             # 协议类型，可以是TCP或UDP
+    port: 80                  # Service监听的端口
+    targetPort: 8080          # 目标Pod的端口
+
+---
+# NodePort：在每个节点上开放一个静态端口、可以通过<NodeIP>:<NodePort>从集群外部访问、自动创建ClusterIP（内部仍可通过ClusterIP访问）
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-nodeport-service
+  namespace: wangyu
+spec:
+  type: NodePort              # Service类型为NodePort
+  selector:
+    app: wangyu-node
+  ports:
+  - name: http
+    protocol: TCP
+    port: 80                  # Service监听的端口
+    targetPort: 8080          # 目标Pod的端口
+    nodePort: 30080           # 节点上开放的端口(范围30000-32767)
+
+---
+# LoadBalancer：自动创建外部负载均衡器（需要云提供商支持）、自动创建NodePort和ClusterIP、提供唯一的外部IP地址供访问、适合生产环境，提供高可用性和负载均衡
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-loadbalancer-service
+  namespace: wangyu
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb" # 云提供商特定注解，指示云控制器创建一个 Network Load Balancer 
+spec:
+  type: LoadBalancer          # Service类型为LoadBalancer
+  selector:
+    app: wangyu-node
+  ports:
+  - name: http
+    protocol: TCP
+    port: 80
+    targetPort: 8080
+  # 外部流量策略，可选Local或Cluster
+  externalTrafficPolicy: Local # 保留客户端源IP（节点只会将外部流量转发到运行在本节点的 Pod，避免了 SNAT），但可能导致负载不均衡
+
+---
+# ExternalName：将服务映射到外部域名、不代理任何流量，只是简单的CNAME重定向、没有selector，也不创建Endpoints
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-externalname-service
+  namespace: wangyu
+spec:
+  type: ExternalName          # Service类型为ExternalName
+  # 注意：ExternalName类型的Service没有selector和ports定义
+  externalName: api.external.example.com # 外部服务的域名
+  # 可选：如果外部服务使用特定端口
+  ports:
+  - name: https
+    protocol: TCP
+    # Service端口：curl https://my-externalname-service 等价于 curl https://api.external.example.com:443
+    port: 443                
+    # 注意：targetPort不适用于ExternalName服务
