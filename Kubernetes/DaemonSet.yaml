@@ -1,0 +1,76 @@
+---
+# DaemonSet：确保集群中所有（或部分）节点上都运行一个指定的 Pod 副本，用于节点日志收集、节点性能监控
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-log-collector # DaemonSet的名称
+  namespace: kube-system # 部署到kube-system命名空间，通常用于系统级组件
+  labels:
+    k8s-app: node-log-collector
+    app.kubernetes.io/name: node-log-collector
+spec:
+  selector:
+    matchLabels:
+      k8s-app: node-log-collector
+  template:
+    metadata:
+      labels:
+        k8s-app: node-log-collector
+    spec:
+      hostNetwork: true # 使用主机网络命名空间，使Pod可以直接访问主机网络
+      hostPID: true # 使用主机PID命名空间，使Pod可以看到主机上的所有进程
+      tolerations:
+        - operator: Exists # 容忍所有污点，确保在所有节点上运行（包括master节点）
+      containers:
+      - name: log-collector
+        image: fluent/fluentd:v1.16-2
+        # 以特权模式运行，以便访问节点上的文件系统
+        securityContext:
+          privileged: true
+        resources:
+          limits:
+            memory: 200Mi
+          requests:
+            cpu: 100m
+            memory: 200Mi
+        volumeMounts:
+        # 挂载节点根文件系统，访问所有日志
+        - name: rootfs
+          mountPath: /host
+          readOnly: true
+        # 挂载容器日志目录
+        - name: varlogcontainers
+          mountPath: /var/log/containers
+          readOnly: true
+        # 挂载Pod日志目录
+        - name: varlogpods
+          mountPath: /var/log/pods
+          readOnly: true
+        # 挂载宿主机日志目录
+        - name: varlog
+          mountPath: /var/log
+          readOnly: true
+        # fluentd 配置文件挂载
+        - name: config-volume
+          mountPath: /fluentd/etc
+        # 设置工作目录到宿主机的根目录
+        workingDir: /host
+      # 终止宽限期，确保有足够时间完成日志收集
+      terminationGracePeriodSeconds: 60
+      volumes:
+      - name: rootfs
+        hostPath:
+          path: /
+      - name: varlogcontainers
+        hostPath:
+          path: /var/log/containers
+      - name: varlogpods
+        hostPath:
+          path: /var/log/pods
+      - name: varlog
+        hostPath:
+          path: /var/log
+      # 引用名为fluentd-config的ConfigMap作为fluentd的配置卷
+      - name: config-volume
+        configMap:
+          name: fluentd-config
