@@ -1,0 +1,94 @@
+---
+# Job：主要作用是创建一个或多个 Pod 来处理一次性任务，如：数据库迁移、计算任务等
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mysql-database-migration
+  namespace: wangyu
+  labels:
+    app: mysql-migration
+    component: database
+    tier: backend
+spec:
+  # backoffLimit 指定在标记 Job 为失败之前的重试次数
+  backoffLimit: 2
+  # ttlSecondsAfterFinished 指定 Job 完成后多少秒自动删除，数据库迁移完成后自动清理，避免积累过多历史记录
+  ttlSecondsAfterFinished: 86400  # 24小时后自动删除
+  template:
+    spec:
+      # restartPolicy 指定容器失败时的重启策略，对于 Job，有效值为 "OnFailure" 或 "Never"
+      restartPolicy: OnFailure # 数据库迁移任务失败时应该重启重试
+      containers:
+      - name: mysql-migration  # 容器的名称
+        # 使用包含数据库迁移工具的自定义镜像（如包含Flyway/Liquibase的镜像）
+        image: wangyu-mysql-migration:latest
+        
+        # env 定义容器环境变量
+        env:
+        - name: DB_HOST
+          value: "mysql-service"  # MySQL服务名称（K8s服务发现）
+        - name: DB_PORT
+          value: "3306" # MySQL默认端口
+        - name: DB_NAME
+          value: "wangyu" # 要迁移的数据库名称
+        - name: DB_USER
+          value: "wangyu" # 数据库迁移专用用户
+        
+        # 敏感信息（如密码）应该通过Secret注入，而不是直接写在YAML中
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret  # 预先创建的Secret名称
+              key: password       # Secret中存储密码的键名
+        
+        # 迁移相关配置
+        - name: MIGRATION_VERSION
+          value: "v2.1.0"         # 要应用的迁移版本
+        
+        # resources 指定容器的资源请求和限制, 数据库迁移可能需要较多资源，特别是内存
+        resources:
+          requests:
+            cpu: "250m"           # 250 milliCPU (0.25 CPU核心)
+            memory: "512Mi"       # 512 Mebibytes 内存
+          limits:
+            cpu: "500m"           # 500 milliCPU (0.5 CPU核心)
+            memory: "1Gi"         # 1 Gibibyte 内存
+        
+        # 如果迁移工具需要访问迁移脚本文件，可以挂载卷
+        volumeMounts:
+        - name: migration-scripts
+          mountPath: /migrations  # 容器内挂载路径
+          readOnly: true          # 只读挂载
+        
+        # 添加就绪性探针检查数据库是否可连接
+        readinessProbe:
+          exec:
+            command:
+            - "/bin/sh"
+            - "-c"
+            - "mysql -h $DB_HOST -u $DB_USER -p$DB_PASSWORD -e 'SELECT 1'"
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        
+        # 添加生命周期钩子，在迁移前后执行特定操作
+        lifecycle:
+          postStart:
+            exec:
+              command: ["/bin/sh", "-c", "echo 'Migration starting at $(date)' >> /migrations/log.txt"]
+          preStop:
+            exec:
+              command: ["/bin/sh", "-c", "echo 'Migration completed at $(date)' >> /migrations/log.txt"]
+      
+      # volumes 定义Pod可用的存储卷
+      volumes:
+      - name: migration-scripts
+        # 将迁移脚本存储在ConfigMap中
+        configMap:
+          name: migration-scripts-configmap  
+        # 或者使用持久卷声明(PVC)存储迁移脚本
+        # persistentVolumeClaim:
+        #   claimName: migration-scripts-pvc
+
+  # 节点选择器，指定Pod运行在特定节点上
+  nodeSelector:
+    disktype: ssd  # 选择有SSD磁盘的节点以提高性能
