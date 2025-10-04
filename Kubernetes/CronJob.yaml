@@ -1,0 +1,98 @@
+---
+# CronJob：基于 Job 之上构建，用于管理定期执行的，Job允许你使用 Cron 格式的时间表达式来调度 Job 的运行，常用于：数据库定时备份、邮件定时发送
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: mysql-daily-backup
+  namespace: wangyu
+  labels:
+    app: mysql-backup
+    component: database
+    tier: backup
+    schedule: daily
+spec:
+  # schedule 使用 Cron 格式的时间表达式定义执行计划
+  # 格式: 分钟(0-59) 小时(0-23) 日(1-31) 月(1-12) 星期(0-6)
+  schedule: "0 3 * * *" # 这里设置为每天凌晨3点执行 (UTC时间)
+  # startingDeadlineSeconds 指定启动 Job 的截止时间（秒），如果因任何原因错过了调度时间，会在此时间窗口内尝试启动
+  startingDeadlineSeconds: 600
+  # concurrencyPolicy 指定如何处理并发执行
+  # Forbid: 如果前一个任务还在运行，则跳过下一次执行（推荐用于备份）
+  # Allow: 允许并发执行（默认）
+  # Replace: 取消当前运行的任务，替换为新的
+  concurrencyPolicy: Forbid
+  # successfulJobsHistoryLimit 保留的成功完成 Job 数量
+  successfulJobsHistoryLimit: 3
+  # failedJobsHistoryLimit 保留的失败 Job 数量
+  failedJobsHistoryLimit: 3
+  # jobTemplate 定义了 CronJob 创建的 Job 模板
+  jobTemplate:
+    # spec 包含 Job 的详细规范
+    spec:
+      template:
+        spec:
+          # restartPolicy 指定容器失败时的重启策略，对于 Job，有效值为 "OnFailure" 或 "Never"
+          restartPolicy: OnFailure
+          containers:
+          - name: mysql-backup
+            # 包含MySQL客户端和备份工具的自定义镜像（如包含mysqldump的镜像）
+            image: wangyu-mysql-backup:latest
+            
+            # env 定义容器环境变量
+            env:
+            - name: DB_HOST
+              value: "mysql-service" # MySQL服务名称（K8s服务发现）
+            - name: DB_PORT
+              value: "3306" # MySQL默认端口
+            - name: DB_NAME
+              value: "myapp_database" # 要备份的数据库名称
+            - name: DB_USER
+              value: "backup_user" # 数据库备份专用用户
+            
+            # 敏感信息（如密码）通过Secret注入
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-backup-secret  # 预先创建的Secret名称
+                  key: password              # Secret中存储密码的键名
+            
+            # 备份相关配置
+            - name: BACKUP_DIR
+              value: "/backups"              # 容器内备份文件存储路径
+            - name: BACKUP_PREFIX
+              value: "daily-backup"          # 备份文件前缀
+            - name: COMPRESSION_LEVEL
+              value: "6"                     # 压缩级别(0-9)
+            
+            # resources 指定容器的资源请求和限制，数据库备份可能需要较多资源，特别是I/O和内存
+            resources:
+              requests:
+                cpu: "500m"           # 500 milliCPU (0.5 CPU核心)
+                memory: "1Gi"         # 1 Gibibyte 内存
+              limits:
+                cpu: "1"              # 1 CPU核心
+                memory: "2Gi"         # 2 Gibibytes 内存
+            
+            # 挂载卷用于存储备份文件
+            volumeMounts:
+            - name: backup-storage
+              mountPath: /backups     # 容器内挂载路径
+
+            # 可以添加生命周期钩子，在备份前后执行特定操作
+            lifecycle:
+              postStart:
+                exec:
+                  command: ["/bin/sh", "-c", "echo 'Backup starting at $(date)' >> /backups/backup.log"]
+              preStop:
+                exec:
+                  command: ["/bin/sh", "-c", "echo 'Backup completed at $(date)' >> /backups/backup.log"]
+          
+          # volumes 定义Pod可用的存储卷
+          volumes:
+          - name: backup-storage
+            # 使用持久卷声明(PVC)存储备份文件
+            persistentVolumeClaim:
+              claimName: mysql-backup-pvc  # 预先创建的PVC名称
+  # 可选：节点选择器，指定Pod运行在特定节点上
+  nodeSelector:
+    disktype: ssd  # 选择有SSD磁盘的节点以提高备份性能
