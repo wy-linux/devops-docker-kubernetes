@@ -1,0 +1,105 @@
+---
+# ConfigMap：存储非敏感的、明文的配置数据（配置文件、环境变量、命令行参数等）到etcd中，它使应用程序配置与容器镜像分离，从而实现配置的灵活修改和应用程序的便携性
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-config
+  namespace: wangyu
+# 数据部分，存储非敏感的配置信息
+data:
+  # 键值对形式的简单配置
+  mysql-port: "3306"
+  mysql-charset: "utf8mb4"
+  mysql-collation: "utf8mb4_unicode_ci"
+  # 完整的配置文件内容 (使用 | 保留换行格式)
+  my-cnf: |
+    [mysqld]
+    # 基础配置
+    port=3306
+    character-set-server=utf8mb4
+    collation-server=utf8mb4_unicode_ci
+    
+    # 连接配置
+    max_connections=1000
+    connect_timeout=60
+    wait_timeout=28800
+    
+    # 缓冲池大小 (根据实际情况调整)
+    innodb_buffer_pool_size=256M
+    
+    # 日志配置
+    slow_query_log=1
+    long_query_time=2
+    log-error=/var/log/mysql/error.log
+    
+    [client]
+    default-character-set=utf8mb4
+    
+    [mysql]
+    default-character-set=utf8mb4
+  # 初始化脚本
+  init-sql: |
+    CREATE DATABASE IF NOT EXISTS wangyu;
+    CREATE USER IF NOT EXISTS 'wangyu'@'%' IDENTIFIED BY 'wangyu123';
+    GRANT ALL PRIVILEGES ON wangyu.* TO 'wangyu'@'%';
+    FLUSH PRIVILEGES;
+
+---
+# 创建 ConfigMap 后，可以通过两种主要方式被 Pod 使用：1.作为环境变量 2.作为卷挂载
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql-statefulset
+  namespace: wangyu
+spec:
+  serviceName: mysql-service
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      containers:
+      - name: mysql-container
+        image: mysql:8.0
+        ports:
+        - containerPort: 3306
+        # 环境变量注入方式使用 ConfigMap
+        env:
+        - name: MYSQL_PORT  # 容器内的环境变量名
+          valueFrom:
+            configMapKeyRef:
+              name: mysql-config  # 引用的 ConfigMap 名称
+              key: mysql-port     # ConfigMap 中的键名
+        - name: MYSQL_CHARSET
+          valueFrom:
+            configMapKeyRef:
+              name: mysql-config
+              key: mysql-charset
+        # 使用整个 ConfigMap 作为环境变量 
+        envFrom:
+        - configMapRef:
+            name: mysql-config  # 将 ConfigMap 中的所有键值对作为环境变量
+        # 文件挂载方式使用 ConfigMap
+        volumeMounts:
+        - name: mysql-config-volume  # 引用下面定义的卷名称
+          mountPath: "/etc/mysql/conf.d/my.cnf"  # 挂载到容器内的路径
+          subPath: my-cnf  # 只挂载 ConfigMap 中的特定键(my-cnf)而不是整个卷
+          readOnly: true   # 设置为只读，增强安全性
+        - name: mysql-config-volume
+          mountPath: "/docker-entrypoint-initdb.d/init.sql"
+          subPath: init-sql  # 挂载 ConfigMap 中的 init-sql 键
+          readOnly: true
+        - name: mysql-config-volume
+          mountPath: "/app-config"  # 挂载整个 ConfigMap 到一个目录
+          readOnly: true
+      # 卷定义
+      volumes:
+      - name: mysql-config-volume  # 卷名称，与上面的 volumeMounts 对应
+        configMap:
+          name: mysql-config  # 使用的 ConfigMap 名称
+          # 可选：指定默认文件权限
+          defaultMode: 0444  # 只读权限
